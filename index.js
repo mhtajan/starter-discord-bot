@@ -1,113 +1,255 @@
-
-// const { clientId, guildId, token, publicKey } = require('./config.json');
+const Discord = require('discord.js');
+const fs = require('node:fs');
+const path = require('node:path');
+const fetch = require('node-fetch');
+const { Client, Collection,EmbedBuilder , Events, GatewayIntentBits, ActionRowBuilder,ModalBuilder, TextInputBuilder, TextInputStyle} = require('discord.js');
 require('dotenv').config()
-const APPLICATION_ID = process.env.APPLICATION_ID 
-const TOKEN = process.env.TOKEN 
-const PUBLIC_KEY = process.env.PUBLIC_KEY || 'not set'
-const GUILD_ID = process.env.GUILD_ID 
+const prefix = process.env.PREFIX 
+const token = process.env.TOKEN 
+
+const sqlite3 = require('sqlite3').verbose();
 
 
-const axios = require('axios')
-const express = require('express');
-const { InteractionType, InteractionResponseType, verifyKeyMiddleware } = require('discord-interactions');
 
+const client = new Client({ intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildMembers,] });
+client.commands = new Discord.Collection(); // Accessing commands collection
 
-const app = express();
-// app.use(bodyParser.json());
+//client.commands = new Collection();
 
-const discord_api = axios.create({
-  baseURL: 'https://discord.com/api/',
-  timeout: 3000,
-  headers: {
-	"Access-Control-Allow-Origin": "*",
-	"Access-Control-Allow-Methods": "GET, POST, PUT, DELETE",
-	"Access-Control-Allow-Headers": "Authorization",
-	"Authorization": `Bot ${TOKEN}`
-  }
+const commandsPath = path.join(__dirname, 'commands');
+const commandFiles = fs.readdirSync(commandsPath).filter(file => file.endsWith('.js'));
+
+for (const file of commandFiles) {
+	const filePath = path.join(commandsPath, file);
+	const command = require(filePath);
+	// Set a new item in the Collection with the key as the command name and the value as the exported module
+	if ('data' in command && 'execute' in command) {
+		client.commands.set(command.data.name, command);
+	} else {
+		console.log(`[WARNING] The command at ${filePath} is missing a required "data" or "execute" property.`);
+	}
+}
+//storing nitro
+let placeholder 
+client.on(Events.InteractionCreate, async interaction => {
+	if (interaction.isStringSelectMenu()){
+		if(interaction.customId === 'selectNitro'){
+
+			const selected = interaction.values[0];
+			placeholder = interaction.values
+
+			const modal = new ModalBuilder()
+				.setCustomId('nitroLink')
+				.setTitle(`Add ${selected}`);
+	
+			const linksInput = new TextInputBuilder()
+				.setCustomId('linksInput')
+				.setLabel(`Add discord ${selected}`)
+				.setStyle(TextInputStyle.Paragraph);
+	
+			const LinkActionRow = new ActionRowBuilder().addComponents(linksInput);
+			modal.addComponents(LinkActionRow);	
+			await interaction.showModal(modal)
+		}
+		if(interaction.customId === 'claimNitro'){
+			const selected = interaction.values[0];
+			placeholder = interaction.values
+
+			const modal = new ModalBuilder()
+				.setCustomId('claimLink')
+				.setTitle(`Claim ${selected}`)
+
+			const claimInput = new TextInputBuilder()
+				.setCustomId('claimInput')
+				.setLabel(`Number of stocks to claim`)
+				.setStyle(TextInputStyle.Short)
+
+			const ClaimActionRow = new ActionRowBuilder().addComponents(claimInput);
+			modal.addComponents(ClaimActionRow)
+			await interaction.showModal(modal)
+		}
+	}
+	if (interaction.isModalSubmit()){
+		if(interaction.customId === 'nitroLink'){
+			const NLinks = interaction.fields.getTextInputValue('linksInput')
+			linksArray = separateLinks(NLinks)
+			filteredLinks = filterValidUrls(linksArray)
+			storeLinkstoDB(filteredLinks,placeholder[0])
+			// const productsJson = JSON.stringify(products);
+			// console.log(productsJson)
+			await interaction.reply('Links Stored!')
+		}
+		if(interaction.customId === 'claimLink'){
+			const CLinks = interaction.fields.getTextInputValue('claimInput')
+			getStoreLinkfromDB(CLinks,interaction)
+		}
+		if(interaction.customId === 'validateLink'){
+			const validateLinks = interaction.fields.getTextInputValue('validateLinkInput');
+			const validLinksArray = separateLinks(validateLinks);
+			const filteredValidLinks = filterValidUrls(validLinksArray);
+
+			const promises = filteredValidLinks.map(async (element) => {
+			const nitro_code = element.substr(element.length - 16);
+			const response = await fetch(`https://discordapp.com/api/v9/entitlements/gift-codes/${nitro_code}?with_application=false&with_subscription_plan=true`);
+
+			if (response.status === 200) {
+				const data = await response.json();
+				console.log(`${data.code} expires at: ${data.expires_at} created_by: ${data.user.username}#${data.user.discriminator}`);
+
+				return {
+				name: 'Code',
+				value: `✅ ${data.code} \nExpires: ${data.expires_at} by ${data.user.username}#${data.user.discriminator}`,
+				inline: true
+				};
+			} else {
+				console.log('Invalid');
+
+				return {
+				name: 'Code',
+				value: `🚫 ${nitro_code} - **INVALID**`
+				};
+			}
+			});
+
+			Promise.all(promises).then((fields) => {
+			const validLinksEmbed = new EmbedBuilder()
+				.setTitle('Nitro Code status')
+				.setTimestamp()
+				.addFields(fields);
+
+			interaction.reply({ embeds: [validLinksEmbed] });
+			});
+
+		}
+	}
+	else return;
+	
 });
 
 
+async function getStoreLinkfromDB(N,interaction){
+	const db = new sqlite3.Database('./mydatabase.db');
+	
+	db.serialize(async() => {
+		db.all(`SELECT * FROM products WHERE availability = 1 LIMIT ${N} `, (err, rows) => {
+		  if (err) {
+			console.error(err.message);
+			return;
+		  }
+		  console.log(rows)
+		  let LinkStr = ''
+		  rows.forEach(row => {
+			db.run(`UPDATE products SET availability = ? WHERE id = ?`, [0, row.id], (err) => {
+			  if (err) {
+				console.error(err.message);
+				return;
+			  }
+			  console.log(row.link)
+			  LinkStr += `${row.link}\n`
+			  console.log(`Availability updated for product ID ${row.id} ${row.link}`);
+			});
+		  });  
+		  db.close();
+		  console.log(LinkStr)
+		  interaction.reply('LinkStr')
+		});
+	  });
+	  
+}
+function storeLinkstoDB(filteredLinks,type){
+	// const name = `product${Object.keys(products).length + 1}`;
+	// products[name] = { link: link,type: type, availability: true };
+	let nitroType = type
+	const db = new sqlite3.Database('./mydatabase.db');
+	db.serialize(() => {
+		db.get("SELECT name FROM sqlite_master WHERE type='table' AND name='products'", (err, row) => {
+		  if (err) {
+			console.error(err.message);
+			return;
+		  }
+	  
+		  if (!row) {
+			db.run('CREATE TABLE products (id INTEGER PRIMARY KEY AUTOINCREMENT, link TEXT, type TEXT, availability INTEGER)');
+			const stmt = db.prepare('INSERT INTO products (link, type, availability) VALUES (?, ?, ?)');
+			filteredLinks.forEach(singleLink => {
+			  stmt.run(singleLink, nitroType, 1);
+			});
+			stmt.finalize();
+			db.each('SELECT id, link, type, availability FROM products', (err, row) => {
+			  console.log(`${row.id}: ${row.link} (${row.type}) - available: ${row.availability}`);
+			}, () => {
+			  db.close();
+			  console.log('Database connection closed');
+			});
+		  } else {
+			const stmt = db.prepare('INSERT INTO products (link, type, availability) VALUES (?, ?, ?)');
+			filteredLinks.forEach(singleLink => {
+			  stmt.run(singleLink, nitroType, 1);
+			});
+			stmt.finalize();
+			db.each('SELECT id, link, type, availability FROM products', (err, row) => {
+			  console.log(`${row.id}: ${row.link} (${row.type}) - available: ${row.availability}`);
+			}, () => {
+			  db.close();
+			  console.log('Database connection closed');
+			});
+		  }
+		});
+	  });
+	  
+
+}
+
+function separateLinks(LinksString){
+	const links = LinksString.split(/[\n\s]+/);
+	return links.filter(link => link.length > 0)
+}
+
+function isValidUrl(url){
+	try{
+		new URL(url)
+		return true;
+	}
+	catch(error){
+		return false;
+	}
+}
+function filterValidUrls(urls){
+	return urls.filter(url => isValidUrl(url));
+}
 
 
-app.post('/interactions', verifyKeyMiddleware(PUBLIC_KEY), async (req, res) => {
-  const interaction = req.body;
+client.on(Events.InteractionCreate, async interaction => {
+	if (!interaction.isChatInputCommand()) return;
 
-  if (interaction.type === InteractionType.APPLICATION_COMMAND) {
-    console.log(interaction.data.name)
-    if(interaction.data.name == 'yo'){
-      return res.send({
-        type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
-        data: {
-          content: `Yo ${interaction.member.user.username}!`,
-        },
-      });
-    }
+	const command = interaction.client.commands.get(interaction.commandName);
 
-    if(interaction.data.name == 'dm'){
-      // https://discord.com/developers/docs/resources/user#create-dm
-      let c = (await discord_api.post(`/users/@me/channels`,{
-        recipient_id: interaction.member.user.id
-      })).data
-      try{
-        // https://discord.com/developers/docs/resources/channel#create-message
-        let res = await discord_api.post(`/channels/${c.id}/messages`,{
-          content:'Yo! I got your slash command. I am not able to respond to DMs just slash commands.',
-        })
-        console.log(res.data)
-      }catch(e){
-        console.log(e)
-      }
+	if (!command) {
+		console.error(`No command matching ${interaction.commandName} was found.`);
+		return;
+	}
 
-      return res.send({
-        // https://discord.com/developers/docs/interactions/receiving-and-responding#responding-to-an-interaction
-        type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
-        data:{
-          content:'👍'
-        }
-      });
-    }
-  }
-
+	try {
+		await command.execute(interaction);
+	} catch (error) {
+		console.error(error);
+		if (interaction.replied || interaction.deferred) {
+			await interaction.followUp({ content: 'There was an error while executing this command!', ephemeral: true });
+		} else {
+			await interaction.reply({ content: 'There was an error while executing this command!', ephemeral: true });
+		}
+	}
 });
 
-
-
-app.get('/register_commands', async (req,res) =>{
-  let slash_commands = [
-    {
-      "name": "yo",
-      "description": "replies with Yo!",
-      "options": []
-    },
-    {
-      "name": "dm",
-      "description": "sends user a DM",
-      "options": []
-    }
-  ]
-  try
-  {
-    // api docs - https://discord.com/developers/docs/interactions/application-commands#create-global-application-command
-    let discord_response = await discord_api.put(
-      `/applications/${APPLICATION_ID}/guilds/${GUILD_ID}/commands`,
-      slash_commands
-    )
-    console.log(discord_response.data)
-    return res.send('commands have been registered')
-  }catch(e){
-    console.error(e.code)
-    console.error(e.response?.data)
-    return res.send(`${e.code} error from discord`)
-  }
+client.on(Events.GuildCreate, async guild => {
+	//insert Deploy Commands Here
 })
 
-
-app.get('/', async (req,res) =>{
-  return res.send('Follow documentation ')
-})
-
-
-app.listen(8999, () => {
-
-})
-
+client.once('ready', () => {
+    console.log('Bot is online');
+});
+client.login(token)
